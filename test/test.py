@@ -106,7 +106,7 @@ async def test_pwm_duty_cycle(dut):
             high_count += 1
 
     # Read envelope via internal signal
-    envelope = dut.dut.envelope.value.to_unsigned()
+    envelope = dut.user_project.envelope.value.to_unsigned()
     dut._log.info(f"  envelope={envelope}  high_count={high_count}")
 
     assert abs(high_count - envelope) <= 4, \
@@ -136,7 +136,7 @@ async def test_envelope_increases_from_zero(dut):
 
     await ClockCycles(dut.clk, 50_000)
 
-    envelope = dut.dut.envelope.value.to_unsigned()
+    envelope = dut.user_project.envelope.value.to_unsigned()
     assert envelope > 0, f"Envelope still 0 after 50k clocks — not advancing!"
 
     dut._log.info(f"PASS: envelope={envelope} after 50k clocks")
@@ -163,7 +163,7 @@ async def test_sawtooth_mode(dut):
     prev_env = 0
     for cycle in range(200_000):
         await RisingEdge(dut.clk)
-        curr_env = dut.dut.envelope.value.to_unsigned()
+        curr_env = dut.user_project.envelope.value.to_unsigned()
         # A decrease is only valid as the natural 255→0 wrap
         if curr_env < prev_env:
             assert prev_env == 255 and curr_env == 0, \
@@ -190,15 +190,15 @@ async def test_re_reset_clears_envelope(dut):
 
     # Let it run so envelope advances
     await ClockCycles(dut.clk, 50_000)
-    env_before = dut.dut.envelope.value.to_unsigned()
+    env_before = dut.user_project.envelope.value.to_unsigned()
     dut._log.info(f"  envelope before re-reset: {env_before}")
 
     # Re-assert reset
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 4)
 
-    assert dut.dut.envelope.value.to_unsigned() == 0, \
-        f"Envelope not cleared on re-reset: {dut.dut.envelope.value.to_unsigned()}"
+    assert dut.user_project.envelope.value.to_unsigned() == 0, \
+        f"Envelope not cleared on re-reset: {dut.user_project.envelope.value.to_unsigned()}"
     assert dut.uo_out.value == 0, \
         f"uo_out not 0 during reset: {dut.uo_out.value}"
 
@@ -228,7 +228,7 @@ async def test_speed_select(dut):
     dut.rst_n.value = 1
 
     await ClockCycles(dut.clk, RUN_CLOCKS)
-    env_fast = dut.dut.envelope.value.to_unsigned()
+    env_fast = dut.user_project.envelope.value.to_unsigned()
 
     # --- Measure steps at speed=00 (slowest) ---
     dut.rst_n.value = 0
@@ -237,7 +237,7 @@ async def test_speed_select(dut):
     dut.rst_n.value = 1
 
     await ClockCycles(dut.clk, RUN_CLOCKS)
-    env_slow = dut.dut.envelope.value.to_unsigned()
+    env_slow = dut.user_project.envelope.value.to_unsigned()
 
     dut._log.info(f"  envelope after {RUN_CLOCKS} clocks: fast={env_fast}, slow={env_slow}")
 
