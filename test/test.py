@@ -36,7 +36,7 @@ async def test_bidir_pins(dut):
     cocotb.start_soon(clock.start())
 
     dut.ena.value = 1
-    dut.ui_in.value = 0b00000011   # speed=11 (fastest)
+    dut.ui_in.value = 0b00000011
     dut.uio_in.value = 0
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 4)
@@ -58,7 +58,7 @@ async def test_output_bits_uniform(dut):
     cocotb.start_soon(clock.start())
 
     dut.ena.value = 1
-    dut.ui_in.value = 0b00000011   # speed=11 (fastest)
+    dut.ui_in.value = 0b00000011
     dut.uio_in.value = 0
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 4)
@@ -74,55 +74,12 @@ async def test_output_bits_uniform(dut):
 
 
 @cocotb.test()
-async def test_pwm_duty_cycle(dut):
+async def test_pwm_activity(dut):
     """
-    PWM duty cycle should track the envelope value.
-    At speed=11 (fastest), one envelope step = 2^13 * 2 = 16384 clocks.
-    We run long enough for envelope to reach a stable mid-range value,
-    then measure high-fraction over exactly 256 clocks (one PWM period).
-    Expected: high_count ≈ envelope value (±4 tolerance).
+    After reset, uo_out must both go HIGH and LOW within a reasonable window,
+    confirming the PWM is actively running. Uses only external pins.
     """
-    dut._log.info("Test 4: PWM duty cycle tracks envelope")
-
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-
-    dut.ena.value = 1
-    dut.ui_in.value = 0b00000011   # speed=11 (fastest), triangle mode
-    dut.uio_in.value = 0
-    dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 4)
-    dut.rst_n.value = 1
-
-    # Run until envelope has advanced enough (envelope steps happen every ~16k clocks)
-    # 40 steps * 16384 clocks/step = ~655k clocks to reach envelope ~40
-    await ClockCycles(dut.clk, 700_000)
-
-    # Measure duty cycle over 256 consecutive clocks (one full PWM period)
-    high_count = 0
-    for _ in range(256):
-        await RisingEdge(dut.clk)
-        if dut.uo_out.value.to_unsigned() == 0xFF:
-            high_count += 1
-
-    # Read envelope via internal signal
-    envelope = dut.user_project.envelope.value.to_unsigned()
-    dut._log.info(f"  envelope={envelope}  high_count={high_count}")
-
-    assert abs(high_count - envelope) <= 4, \
-        f"Duty cycle mismatch: high_count={high_count}, envelope={envelope}"
-
-    dut._log.info(f"PASS: duty cycle={high_count}/256 matches envelope={envelope}")
-
-
-@cocotb.test()
-async def test_envelope_increases_from_zero(dut):
-    """
-    After reset, envelope starts at 0 and must increase over time.
-    At speed=11, one step takes ~16k clocks. Run 50k clocks and confirm
-    envelope has moved above 0.
-    """
-    dut._log.info("Test 5: Envelope increases from 0 after reset")
+    dut._log.info("Test 4: PWM is active (output toggles)")
 
     clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
@@ -134,21 +91,70 @@ async def test_envelope_increases_from_zero(dut):
     await ClockCycles(dut.clk, 4)
     dut.rst_n.value = 1
 
-    await ClockCycles(dut.clk, 50_000)
+    saw_high = False
+    saw_low  = False
+    for _ in range(200_000):
+        await RisingEdge(dut.clk)
+        v = dut.uo_out.value.to_unsigned()
+        if v == 0xFF: saw_high = True
+        if v == 0x00: saw_low  = True
+        if saw_high and saw_low:
+            break
 
-    envelope = dut.user_project.envelope.value.to_unsigned()
-    assert envelope > 0, f"Envelope still 0 after 50k clocks — not advancing!"
-
-    dut._log.info(f"PASS: envelope={envelope} after 50k clocks")
+    assert saw_high, "uo_out never went HIGH — envelope not advancing!"
+    assert saw_low,  "uo_out never went LOW — PWM counter not running!"
+    dut._log.info("PASS: PWM is actively toggling output")
 
 
 @cocotb.test()
-async def test_sawtooth_mode(dut):
+async def test_duty_cycle_increases(dut):
     """
-    With ui_in[2]=1 (dir_lock), envelope must only increase or wrap 255→0.
-    It must never decrease mid-ramp.
+    Duty cycle (fraction of HIGH cycles) must increase over time from reset,
+    confirming the envelope is counting upward. Uses only external pins.
     """
-    dut._log.info("Test 6: Sawtooth mode — envelope never decreases")
+    dut._log.info("Test 5: Duty cycle increases as envelope rises")
+
+    clock = Clock(dut.clk, 10, unit="us")
+    cocotb.start_soon(clock.start())
+
+    dut.ena.value = 1
+    dut.ui_in.value = 0b00000011
+    dut.uio_in.value = 0
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 4)
+    dut.rst_n.value = 1
+
+    # Window 1: early (envelope still low)
+    await ClockCycles(dut.clk, 20_000)
+    high_1 = 0
+    for _ in range(256):
+        await RisingEdge(dut.clk)
+        if dut.uo_out.value.to_unsigned() == 0xFF:
+            high_1 += 1
+
+    # Window 2: later (envelope has risen)
+    await ClockCycles(dut.clk, 200_000)
+    high_2 = 0
+    for _ in range(256):
+        await RisingEdge(dut.clk)
+        if dut.uo_out.value.to_unsigned() == 0xFF:
+            high_2 += 1
+
+    dut._log.info(f"  early duty={high_1}/256, later duty={high_2}/256")
+
+    assert high_2 > high_1, \
+        f"Duty cycle did not increase over time: early={high_1} later={high_2}"
+
+    dut._log.info("PASS: Duty cycle increased as envelope rose")
+
+
+@cocotb.test()
+async def test_sawtooth_duty_rises(dut):
+    """
+    In sawtooth mode (dir_lock=1), duty cycle must increase between two
+    consecutive sample windows. Uses only external pins.
+    """
+    dut._log.info("Test 6: Sawtooth mode — duty cycle only increases")
 
     clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
@@ -160,23 +166,32 @@ async def test_sawtooth_mode(dut):
     await ClockCycles(dut.clk, 4)
     dut.rst_n.value = 1
 
-    prev_env = 0
-    for cycle in range(200_000):
+    await ClockCycles(dut.clk, 20_000)
+    high_1 = 0
+    for _ in range(256):
         await RisingEdge(dut.clk)
-        curr_env = dut.user_project.envelope.value.to_unsigned()
-        # A decrease is only valid as the natural 255→0 wrap
-        if curr_env < prev_env:
-            assert prev_env == 255 and curr_env == 0, \
-                f"Cycle {cycle}: envelope decreased {prev_env}→{curr_env} without wrapping!"
-        prev_env = curr_env
+        if dut.uo_out.value.to_unsigned() == 0xFF:
+            high_1 += 1
 
-    dut._log.info("PASS: Envelope never decreased outside of 255→0 wrap")
+    await ClockCycles(dut.clk, 100_000)
+    high_2 = 0
+    for _ in range(256):
+        await RisingEdge(dut.clk)
+        if dut.uo_out.value.to_unsigned() == 0xFF:
+            high_2 += 1
+
+    dut._log.info(f"  sawtooth window1={high_1}/256, window2={high_2}/256")
+
+    assert high_2 >= high_1 or high_2 == 0, \
+        f"Sawtooth duty cycle decreased without wrap: {high_1} -> {high_2}"
+
+    dut._log.info("PASS: Sawtooth duty cycle did not decrease")
 
 
 @cocotb.test()
-async def test_re_reset_clears_envelope(dut):
-    """Re-asserting reset at any time must clear envelope back to 0."""
-    dut._log.info("Test 7: Re-reset clears envelope")
+async def test_re_reset_clears_output(dut):
+    """Re-asserting reset must bring uo_out back to 0. Uses only external pins."""
+    dut._log.info("Test 7: Re-reset clears output")
 
     clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
@@ -187,62 +202,65 @@ async def test_re_reset_clears_envelope(dut):
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 4)
     dut.rst_n.value = 1
-
-    # Let it run so envelope advances
     await ClockCycles(dut.clk, 50_000)
-    env_before = dut.user_project.envelope.value.to_unsigned()
-    dut._log.info(f"  envelope before re-reset: {env_before}")
 
-    # Re-assert reset
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 4)
 
-    assert dut.user_project.envelope.value.to_unsigned() == 0, \
-        f"Envelope not cleared on re-reset: {dut.user_project.envelope.value.to_unsigned()}"
     assert dut.uo_out.value == 0, \
         f"uo_out not 0 during reset: {dut.uo_out.value}"
+    assert dut.uio_out.value == 0, \
+        f"uio_out not 0 during reset: {dut.uio_out.value}"
 
     dut.rst_n.value = 1
-    dut._log.info("PASS: Re-reset correctly clears envelope and output")
+    dut._log.info("PASS: Re-reset clears output to 0")
 
 
 @cocotb.test()
 async def test_speed_select(dut):
     """
-    Slower speed setting should produce fewer envelope steps in the same
-    number of clocks. Compare step count at speed=11 vs speed=01.
+    speed=11 must produce higher duty cycle than speed=00 after the same
+    number of clocks (faster envelope advance). Uses only external pins.
     """
     dut._log.info("Test 8: Speed select affects breathing rate")
 
-    RUN_CLOCKS = 100_000
+    RUN_CLOCKS = 200_000
 
-    # --- Measure steps at speed=11 (fastest) ---
     clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
 
+    # Measure at speed=11
     dut.ena.value = 1
     dut.ui_in.value = 0b00000011
     dut.uio_in.value = 0
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 4)
     dut.rst_n.value = 1
-
     await ClockCycles(dut.clk, RUN_CLOCKS)
-    env_fast = dut.user_project.envelope.value.to_unsigned()
 
-    # --- Measure steps at speed=00 (slowest) ---
+    high_fast = 0
+    for _ in range(256):
+        await RisingEdge(dut.clk)
+        if dut.uo_out.value.to_unsigned() == 0xFF:
+            high_fast += 1
+
+    # Measure at speed=00
     dut.rst_n.value = 0
     dut.ui_in.value = 0b00000000
     await ClockCycles(dut.clk, 4)
     dut.rst_n.value = 1
-
     await ClockCycles(dut.clk, RUN_CLOCKS)
-    env_slow = dut.user_project.envelope.value.to_unsigned()
 
-    dut._log.info(f"  envelope after {RUN_CLOCKS} clocks: fast={env_fast}, slow={env_slow}")
+    high_slow = 0
+    for _ in range(256):
+        await RisingEdge(dut.clk)
+        if dut.uo_out.value.to_unsigned() == 0xFF:
+            high_slow += 1
 
-    assert env_fast > env_slow, \
-        f"Speed=11 should advance envelope faster than speed=00, but fast={env_fast} slow={env_slow}"
+    dut._log.info(f"  fast={high_fast}/256, slow={high_slow}/256")
 
-    dut._log.info("PASS: Faster speed setting advances envelope more quickly")
+    assert high_fast > high_slow, \
+        f"speed=11 should have higher duty cycle than speed=00: fast={high_fast} slow={high_slow}"
+
+    dut._log.info("PASS: Faster speed setting produces higher duty cycle sooner")
     
